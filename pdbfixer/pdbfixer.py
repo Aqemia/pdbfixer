@@ -696,7 +696,11 @@ class PDBFixer(object):
 
                 if residue == chainResidues[-1] and (chain.index, indexInChain+1) in self.missingResidues:
                     insertHere = self.missingResidues[(chain.index, indexInChain+1)]
-                    if len(insertHere) > 0:
+                    if len(insertHere) == 0:
+                        pass
+                    elif residue.name in proteinResidues:
+                        self._addMissingCTerminalResiduesToChain(newChain, insertHere, residue, newAtoms, newPositions)
+                    else:
                         startPosition = self._computeResidueCenter(residue)
                         outward = _findUnoccupiedDirection(startPosition, residueCenters)*unit.nanometers
                         norm = unit.norm(outward)
@@ -705,6 +709,7 @@ class PDBFixer(object):
                         endPosition = startPosition+outward
                         firstIndex = int(residue.id)+1
                         self._addMissingResiduesToChain(newChain, insertHere, startPosition, endPosition, None, residue, newAtoms, newPositions, firstIndex)
+                    if len(insertHere) > 0:
                         newResidue = list(newChain.residues())[-1]
                         if newResidue.name in proteinResidues:
                             terminalsToAdd = ['OXT']
@@ -808,6 +813,49 @@ class PDBFixer(object):
                         newPositions[atom.index] = mm.Vec3(*np.dot(rotation, d))*unit.nanometer + points[2]
 
             prevResidue = newResidue
+
+    def _addMissingCTerminalResiduesToChain(
+        self,
+        chain: app.topology.Chain,
+        residueNames: list[str],
+        prevResidue: app.topology.Residue,
+        newAtoms: list[app.topology.Atom], # out
+        newPositions: list[unit.quantity.Quantity], # out
+    ):
+        """Add a series of residues to a c-terminal protein chain end."""
+
+        prevResPositions: dict[str, mm.Vec3] = {
+            atom.name: self.positions[atom.index].value_in_unit(unit.nanometer) for atom in prevResidue.atoms()
+        }
+
+        for residueName in residueNames:
+            template: Template = self._getTemplate(residueName)
+
+            newResPositions = {
+                atom.name: template.positions[atom.index].value_in_unit(unit.nanometer)
+                for atom in template.topology.atoms()
+            }
+
+            # find rotation which aligns CA->C and N->CA (or N->C for NMA cap),
+            # like in a peptide trans conformation
+            points1 = [prevResPositions["CA"], prevResPositions["C"]]
+            points2 = [newResPositions["N"], newResPositions.get("CA", newResPositions["C"])]
+            _, rotate, _ = _overlayPoints(points1, points2)
+
+            # rotate and translate to expected N position
+            newPosN = _findOXTPosition(prevResPositions)
+            newResPositions = {name: np.dot(rotate, pos) for (name, pos) in newResPositions.items()}
+            translation = newPosN - newResPositions["N"]
+            newResPositions = {name: pos + translation for (name, pos) in newResPositions.items()}
+
+            newResidue = chain.topology.addResidue(residueName, chain, "%d" % ((int(prevResidue.id) + 1) % 10000))
+            for atom in template.topology.atoms():
+                newAtom = chain.topology.addAtom(atom.name, atom.element, newResidue)
+                newAtoms.append(newAtom)
+                newPositions.append(mm.Vec3(*newResPositions[atom.name]) * unit.nanometer)
+
+            prevResidue = newResidue
+            prevResPositions = newResPositions
 
     def _renameNewChains(self, startIndex):
         """Rename newly added chains to conform with existing naming conventions.
