@@ -836,10 +836,10 @@ class PDBFixer(object):
                 for atom in template.topology.atoms()
             }
 
-            # find rotation which aligns CA->C and N->CA (or N->C for NMA cap),
+            # find rotation which aligns CA->C and N->CA (or N->C (should be N->CH3) for NME cap),
             # like in a peptide trans conformation
             points1 = [prevResPositions["CA"], prevResPositions["C"]]
-            points2 = [newResPositions["N"], newResPositions.get("CA", newResPositions["C"])]
+            points2 = [newResPositions["N"], newResPositions.get("CA", newResPositions.get("CH3", newResPositions["C"]))]
             _, rotate, _ = _overlayPoints(points1, points2)
 
             # rotate and translate to expected N position
