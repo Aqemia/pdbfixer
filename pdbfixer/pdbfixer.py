@@ -696,11 +696,10 @@ class PDBFixer(object):
 
                 if residue == chainResidues[-1] and (chain.index, indexInChain+1) in self.missingResidues:
                     insertHere = self.missingResidues[(chain.index, indexInChain+1)]
-                    if len(insertHere) == 0:
-                        pass
-                    elif residue.name in proteinResidues:
-                        self._addMissingCTerminalResiduesToChain(newChain, insertHere, residue, newAtoms, newPositions)
-                    else:
+                    checkOXT = len(insertHere) != 0
+                    if len(insertHere) > 0 and residue.name in proteinResidues:
+                        residue, insertHere = self._addMissingCTerminalResiduesToChain(newChain, insertHere, residue, newAtoms, newPositions)
+                    if len(insertHere) > 0:
                         startPosition = self._computeResidueCenter(residue)
                         outward = _findUnoccupiedDirection(startPosition, residueCenters)*unit.nanometers
                         norm = unit.norm(outward)
@@ -709,7 +708,7 @@ class PDBFixer(object):
                         endPosition = startPosition+outward
                         firstIndex = int(residue.id)+1
                         self._addMissingResiduesToChain(newChain, insertHere, startPosition, endPosition, None, residue, newAtoms, newPositions, firstIndex)
-                    if len(insertHere) > 0:
+                    if checkOXT:
                         newResidue = list(newChain.residues())[-1]
                         if newResidue.name in proteinResidues:
                             terminalsToAdd = ['OXT']
@@ -821,14 +820,19 @@ class PDBFixer(object):
         prevResidue: app.topology.Residue,
         newAtoms: list[app.topology.Atom], # out
         newPositions: list[unit.quantity.Quantity], # out
-    ):
-        """Add a series of residues to a c-terminal protein chain end."""
+    ) -> tuple[app.topology.Residue, list[str]]:
+        """Add a series of residues to a c-terminal protein chain end.
+
+        Returns the last added residue and any remaining residue names which
+        could not be placed.
+
+        """
 
         prevResPositions: dict[str, mm.Vec3] = {
             atom.name: self.positions[atom.index].value_in_unit(unit.nanometer) for atom in prevResidue.atoms()
         }
 
-        for residueName in residueNames:
+        for resi, residueName in enumerate(residueNames):
             template: Template = self._getTemplate(residueName)
 
             newResPositions = {
@@ -838,12 +842,16 @@ class PDBFixer(object):
 
             # find rotation which aligns CA->C and N->CA (or N->C (should be N->CH3) for NME cap),
             # like in a peptide trans conformation
-            points1 = [prevResPositions["CA"], prevResPositions["C"]]
-            points2 = [newResPositions["N"], newResPositions.get("CA", newResPositions.get("CH3", newResPositions["C"]))]
-            _, rotate, _ = _overlayPoints(points1, points2)
+            try:
+                points1 = [prevResPositions["CA"], prevResPositions["C"]]
+                points2 = [newResPositions["N"], newResPositions.get("CA", newResPositions.get("CH3", newResPositions["C"]))]
+                newPosN = _findOXTPosition(prevResPositions)
+            except KeyError as ex:
+                print(f"Warning: _addMissingCTerminalResiduesToChain failed: {ex}")
+                return prevResidue, residueNames[resi:]
 
             # rotate and translate to expected N position
-            newPosN = _findOXTPosition(prevResPositions)
+            _, rotate, _ = _overlayPoints(points1, points2)
             newResPositions = {name: np.dot(rotate, pos) for (name, pos) in newResPositions.items()}
             translation = newPosN - newResPositions["N"]
             newResPositions = {name: pos + translation for (name, pos) in newResPositions.items()}
@@ -856,6 +864,8 @@ class PDBFixer(object):
 
             prevResidue = newResidue
             prevResPositions = newResPositions
+
+        return prevResidue, []
 
     def _renameNewChains(self, startIndex):
         """Rename newly added chains to conform with existing naming conventions.
